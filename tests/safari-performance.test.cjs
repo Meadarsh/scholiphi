@@ -1,0 +1,54 @@
+﻿const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const crypto = require('node:crypto');
+const html = fs.readFileSync('index.html', 'utf8');
+assert(html.length < 1200000, 'HTML must not contain the media payloads');
+assert(!/data:(audio|video|image)\//.test(html));
+const refs = new Set(html.match(/assets\/[a-f0-9]+\.(?:mp3|webm|webp|png|jpg)/g));
+assert(refs.size > 30);
+for (const file of refs) {
+  const data = fs.readFileSync(file);
+  assert(file.includes(crypto.createHash('sha256').update(data).digest('hex').slice(0, 20)), file);
+}
+const source = html.match(/<script id="hc-grid-js">([\s\S]*?)<\/script>/)[1];
+function setup(touch) {
+  const created = [], events = {}, observers = {}, frames = new Map();
+  let id = 0, allocations = 0;
+  const classes = new Set(), sec = {classList: {add: n => classes.add(n)}, prepend() {}, getBoundingClientRect: () => ({width: 5000, height: 30000})};
+  const view = {hidden: true};
+  const ctx = new Proxy({}, {get: (o, k) => o[k] || (() => {})});
+  const canvas = {getContext: () => ctx};
+  let width = 300, height = 150;
+  Object.defineProperties(canvas, {width: {get: () => width, set: v => {width = v; allocations++;}}, height: {get: () => height, set: v => {height = v; allocations++;}}});
+  const document = {hidden: false, getElementById: id => id === 'os-problems' ? sec : view, createElement: () => {created.push(canvas); return canvas;}, addEventListener: (n,f) => {events[n] = f;}};
+  const context = {document, navigator: {maxTouchPoints: touch ? 5 : 0}, matchMedia: () => ({matches: false}), window: {devicePixelRatio: 3}, performance: {now: () => 1}, requestAnimationFrame: f => {frames.set(++id, f); return id;}, cancelAnimationFrame: n => frames.delete(n), IntersectionObserver: class {constructor(f) {observers.intersection = f;} observe() {}}, ResizeObserver: class {constructor(f) {observers.resize = f;} observe() {}}, MutationObserver: class {constructor(f) {observers.mutation = f;} observe() {}}};
+  context.window.IntersectionObserver = context.IntersectionObserver;
+  context.window.ResizeObserver = context.ResizeObserver;
+  vm.runInNewContext(source, context);
+  return {created, classes, view, canvas, frames, observers, events, document, allocations: () => allocations};
+}
+let t = setup(true);
+assert.equal(t.created.length, 0);
+assert(t.classes.has('hcgrid-static'));
+console.log('Touch devices use CSS grid without canvas allocation');
+t = setup(false);
+assert.equal(t.canvas.width * t.canvas.height, 1);
+assert.equal(t.frames.size, 0);
+t.view.hidden = false;
+t.observers.intersection([{isIntersecting: true}]);
+assert(t.canvas.width <= 2048 && t.canvas.height <= 2048);
+assert(t.canvas.width * t.canvas.height <= 2000000);
+assert.equal(t.frames.size, 1);
+const allocations = t.allocations();
+t.observers.resize();
+assert.equal(t.allocations(), allocations, 'Unchanged size must not reallocate canvas');
+t.observers.intersection([{isIntersecting: false}]);
+assert.equal(t.canvas.width * t.canvas.height, 1);
+assert.equal(t.frames.size, 0);
+t.observers.intersection([{isIntersecting: true}]);
+t.document.hidden = true; t.events.visibilitychange();
+assert.equal(t.canvas.width * t.canvas.height, 1);
+assert.equal(t.frames.size, 0);
+console.log('Desktop canvas is bounded, avoids redundant allocation, and releases memory off-screen/hidden');
+console.log('All media references resolve to unchanged hashed assets');
